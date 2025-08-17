@@ -22,6 +22,10 @@ def get_game_status():
     return _get_json(f"{DRAFT_BASE}/game", default={})
 
 @st.cache_data(ttl=300)
+def get_league_details(league_id: int):
+    return requests.get(f"{DRAFT_BASE}/league/{league_id}/details", timeout=10).json()
+
+@st.cache_data(ttl=300)
 def get_bootstrap():
     """Fantasy endpoint with teams/elements."""
     return _get_json(f"{FPL_BASE}/bootstrap-static/", default={})
@@ -38,3 +42,8 @@ def get_draft_choices(league_id: int):
     Shape: {"choices": [ { "element": <player_id>, "entry_name": <team name>, ... }, ... ]}
     """
     return _get_json(f"{DRAFT_BASE}/draft/league/{league_id}/choices", default={"choices":[]})
+
+@st.cache_data(ttl=120)  # shorter cache; squads can change with waivers
+def get_entry_event(entry_id: int, event: int):
+    # Current squad (picks) for a given entry + GW
+    return _get_json(f"{DRAFT_BASE}/entry/{entry_id}/event/{event}", default={})
