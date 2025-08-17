@@ -6,6 +6,9 @@ try:
 except Exception:
     ZoneInfo = None
 
+# Build CURRENT ownership (element_id -> owner team name) from each entry's GW picks
+from utils.api import build_current_ownership
+
 # Optional autorefresh (pip install streamlit-autorefresh)
 try:
     from streamlit_autorefresh import st_autorefresh
@@ -17,11 +20,28 @@ from utils.api import (
     get_league_details, get_entry_event, get_event_live,
 )
 
+st.set_page_config(layout="wide")
+
 LEAGUE_ID = 12260
 LOCAL_TZ = ZoneInfo("Europe/London") if ZoneInfo else timezone.utc
 
 def now_str():
     return datetime.now(LOCAL_TZ).strftime("%a %d %b %Y, %H:%M:%S %Z")
+
+def fixture_label(f):
+    home = _team_abbr(f.get("team_h"))
+    away = _team_abbr(f.get("team_a"))
+    # compact date/time (local tz, no year)
+    dt_str = ""
+    if f.get("kickoff_time"):
+        try:
+            dt = datetime.fromisoformat(f["kickoff_time"].replace("Z", "+00:00"))
+            dt_local = dt.astimezone(LOCAL_TZ)
+            dt_str = dt_local.strftime("%a%H%M")  # e.g. Sat1500
+        except Exception:
+            pass
+    return f"{home}-{away}"
+
 
 def format_kickoff(iso_utc: str) -> str:
     if not iso_utc:
@@ -31,20 +51,6 @@ def format_kickoff(iso_utc: str) -> str:
         return dt.astimezone(LOCAL_TZ).strftime("%a %d %b, %H:%M %Z")
     except Exception:
         return iso_utc
-
-# ---- Auto-refresh (60s)
-colA, colB = st.columns([1, 3])
-with colA:
-    auto = st.toggle("Auto-refresh", value=True, key="live_auto")
-with colB:
-    st.caption("Refresh interval: 60 seconds")
-
-if auto and st_autorefresh:
-    st_autorefresh(interval=60_000, key="live_autorefresh")
-elif auto and not st_autorefresh:
-    if st.button("Refresh now"):
-        st.rerun()
-    st.info("Tip: pip install streamlit-autorefresh for smoother updates.")
 
 # ---- Load core data
 status    = get_game_status() or {}
@@ -69,18 +75,11 @@ def _team_abbr(team_id: int) -> str:
     t = teams.get(team_id, {})
     return t.get("abbr", "") if isinstance(t, dict) else ""
 
-# Build CURRENT ownership (element_id -> owner team name) from each entry's GW picks
-ownership = {}
-for e in (league.get("league_entries") or []):
-    entry_id = e.get("entry_id")
-    entry_name = e.get("entry_name")
-    if not entry_id or not entry_name:
-        continue
-    ev = get_entry_event(entry_id, gw) or {}
-    for pick in (ev.get("picks") or []):
-        pid = pick.get("element")
-        if pid:
-            ownership[pid] = entry_name
+LEAGUE_ID = 12260
+gw = status.get("current_event", 1)
+
+# starters_only=True -> only XI (multiplier > 0); False -> XI + bench
+ownership = build_current_ownership(LEAGUE_ID, gw, starters_only=False)
 
 # ---- Live stats map from /event/{gw}/live
 # Endpoint shape can be dict { "82": {...} } or list [{id, stats, ...}]
@@ -155,23 +154,18 @@ st.caption(f"Last refresh: {now_str()}")
 if not fixtures:
     st.info("No fixtures found.")
 else:
-    for f in fixtures:
-        fid = f.get("id")
+    # Create tab labels like "Arsenal vs Chelsea"
+    tab_labels = [fixture_label(f) for f in fixtures]
+    tabs = st.tabs(tab_labels)
+
+    for f, tab in zip(fixtures, tabs):
         home_name = _team_name(f.get("team_h"))
         away_name = _team_name(f.get("team_a"))
-        kickoff = format_kickoff(f.get("kickoff_time"))
+        kickoff   = format_kickoff(f.get("kickoff_time"))
 
-        key_toggle = f"fx_open_{fid}"
-        if key_toggle not in st.session_state:
-            st.session_state[key_toggle] = False
+        with tab:
+            st.subheader(f"{home_name} vs {away_name}\n{kickoff}")
 
-        tcol1, tcol2 = st.columns([9, 1])
-        with tcol1:
-            st.subheader(f"{home_name} vs {away_name} — {kickoff}")
-        with tcol2:
-            open_now = st.checkbox("", value=st.session_state[key_toggle], key=key_toggle)
-
-        with st.expander("Show owned players", expanded=open_now):
             # Players involved in this fixture (by team)
             fixture_team_ids = {f.get("team_h"), f.get("team_a")}
             fixture_players = [p for p in players_by_id.values() if p.get("team") in fixture_team_ids]
@@ -183,65 +177,56 @@ else:
                 st.write("No owned players in this fixture.")
                 continue
 
-            # Build rows with minutes + contrib (from live stats)
-            owned_rows = []
+            # Build rows with stats
+            rows = []
             for p in owned_players:
-                pid = p["id"]
+                pid = int(p["id"])
                 name = p.get("web_name", f"Player {pid}")
-                abbr = _team_abbr(p.get("team"))
+                team_abbr = teams.get(p["team"], {}).get("abbr", "")
                 owner = ownership.get(pid, "—")
 
-                pstats = live_stats_map.get(pid, {})  # dict of live stats
-                minutes_val = pstats.get("minutes") if isinstance(pstats, dict) else None
-                points_val = pstats.get("total_points") if isinstance(pstats, dict) else None
+                stats = live_stats_map.get(pid, {})
+                minutes = stats.get("minutes", 0)
+                points  = stats.get("total_points", 0)
 
+                contribs = []
+                if "minutes" in stats: contribs.append(f"min+{stats['minutes']}")
+                if stats.get("goals_scored"): contribs.append(f"g+{stats['goals_scored']}")
+                if stats.get("assists"): contribs.append(f"a+{stats['assists']}")
+                if stats.get("clean_sheets"): contribs.append(f"cs+{stats['clean_sheets']}")
+                if stats.get("goals_conceded"): contribs.append(f"gc+{stats['goals_conceded']}")
+                if stats.get("yellow_cards"): contribs.append(f"yc+{stats['yellow_cards']}")
+                if stats.get("red_cards"): contribs.append(f"rc+{stats['red_cards']}")
+                if stats.get("saves"): contribs.append(f"saves+{stats['saves']}")
+                if stats.get("bonus"): contribs.append(f"b+{stats['bonus']}")
+                if "bps" in stats: contribs.append(f"bps+{stats['bps']}")
+                if "defensive_contribution" in stats: contribs.append(f"def+{stats['defensive_contribution']}")
 
-                # Build contrib list in a stable order; include only non-zero (except minutes)
-                contrib_list = []
-                for key in STAT_ORDER:
-                    if key == "minutes":
-                        continue
-                    val = pstats.get(key) if isinstance(pstats, dict) else None
-                    if isinstance(val, (int, float)) and val != 0:
-                        label = STAT_LABELS.get(key, key)
-                        contrib_list.append(f"{label}+{int(val) if isinstance(val, (int, float)) else val}")
+                contrib_str = " ".join(contribs) if contribs else "—"
 
-                # Ensure minutes also appears in Contrib at the top
-                if minutes_val is not None:
-                    contrib_list = [f"min+{minutes_val}"] + contrib_list
-
-                owned_rows.append({
-                    "player_team": f"{name} [{abbr}]",
-                    "owner": owner,
-                    "minutes": minutes_val if minutes_val is not None else "—",
-                    "points": points_val if points_val is not None else "—",
-                    "contrib_list": contrib_list,
+                rows.append({
+                    "Player [Team]": f"{name} [{team_abbr}]",
+                    "Owned by": owner,
+                    "Minutes": minutes,
+                    "Points": points,
+                    "Contrib": contrib_str,
                 })
 
-            # Render HTML table so we can keep formatting control
+            # Render table
             html = ['<table class="fixture-table">']
             html.append("<thead><tr><th>Player [Team]</th><th>Owned by</th><th>Minutes</th><th>Points</th><th>Contrib</th></tr></thead><tbody>")
-            for r in owned_rows:
-                contrib_html = "".join(f'{c} ' for c in r["contrib_list"]) or '<span class="item">—</span>'
+            for r in rows:
                 html.append(
                     f"<tr>"
-                    f"<td class='player-team'>{r['player_team']}</td>"
-                    f"<td>{r['owner']}</td>"
-                    f"<td>{r['minutes']}</td>"
-                    f"<td>{r['points']}</td>"
-                    f"<td class='contrib'>{contrib_html}</td>"
+                    f"<td class='player-team'>{r['Player [Team]']}</td>"
+                    f"<td>{r['Owned by']}</td>"
+                    f"<td>{r['Minutes']}</td>"
+                    f"<td>{r['Points']}</td>"
+                    f"<td class='contrib'>{r['Contrib']}</td>"
                     f"</tr>"
                 )
             html.append("</tbody></table>")
             st.markdown("\n".join(html), unsafe_allow_html=True)
-
-# ---- Sticky footer
-st.markdown(
-    f"<div style='position:sticky; bottom:0; background:#0e1117; padding:6px 10px; "
-    f"opacity:0.85; font-size:0.85rem;'>Last refresh: {now_str()} "
-    f"{'• Auto-refresh ON (60s)' if auto and st_autorefresh else '• Auto-refresh OFF'}</div>",
-    unsafe_allow_html=True,
-)
 
 # Dev diagnostics (optional)
 with st.expander("Dev: diagnostics", expanded=False):
