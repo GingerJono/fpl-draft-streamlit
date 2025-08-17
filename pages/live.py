@@ -59,36 +59,41 @@ else:
         home = teams.get(f.get("team_h"), f"Team {f.get('team_h')}")
         away = teams.get(f.get("team_a"), f"Team {f.get('team_a')}")
         kickoff = format_kickoff(f.get("kickoff_time"))
-        st.subheader(f"{home} vs {away} — {kickoff}")
 
-        # players in the two clubs for this fixture
-        fixture_team_ids = {f.get("team_h"), f.get("team_a")}
-        fixture_players = [p for p in players_by_id.values() if p.get("team") in fixture_team_ids]
+        with st.expander(f"{home} vs {away} — {kickoff}", expanded=False):
+            # players in the two clubs for this fixture
+            fixture_team_ids = {f.get("team_h"), f.get("team_a")}
+            fixture_players = [p for p in players_by_id.values() if p.get("team") in fixture_team_ids]
 
-        # owned among them (current ownership for this GW)
-        owned_players = [p for p in fixture_players if p["id"] in ownership]
+            # owned among them (current ownership for this GW)
+            owned_players = [p for p in fixture_players if p["id"] in ownership]
 
-        # prepare any live contributions from the fixture’s stats
-        stat_map = {}
-        for stat in f.get("stats", []):
-            ident = stat.get("identifier")
-            for side in ("h", "a"):
-                for entry in stat.get(side, []):
-                    pid = entry.get("element")
-                    val = entry.get("value")
-                    if pid is not None:
-                        stat_map.setdefault(pid, []).append(f"{ident}+{val}")
+            # prepare any live contributions from the fixture’s stats
+            stat_map = {}
+            for stat in f.get("stats", []):
+                ident = stat.get("identifier")
+                for side in ("h", "a"):
+                    for entry in stat.get(side, []):
+                        pid = entry.get("element")
+                        val = entry.get("value")
+                        if pid is not None:
+                            stat_map.setdefault(pid, []).append(f"{ident}+{val}")
 
-        if not owned_players:
-            st.write("No owned players in this fixture.")
-            continue
+            if not owned_players:
+                st.write("No owned players in this fixture.")
+            else:
+                table = []
+                for p in owned_players:
+                    pid = p["id"]
+                    row = {
+                        "Name": p.get("web_name", f"Player {pid}"),
+                        "Club": teams.get(p.get("team"), f"Team {p.get('team')}"),
+                        "Owned By": ownership.get(pid, "—"),
+                        "Contrib": ", ".join(stat_map.get(pid, [])) if pid in stat_map else "—",
+                    }
+                    table.append(row)
 
-        for p in owned_players:
-            pid = p["id"]
-            name = p.get("web_name", f"Player {pid}")
-            owner = ownership.get(pid, "—")
-            contrib = ", ".join(stat_map.get(pid, [])) if pid in stat_map else "—"
-            st.write(f"- {name} ({owner}) {f'→ {contrib}' if contrib != '—' else ''}")
+                st.table(table)
 
 # Optional dev diagnostics
 with st.expander("Dev: diagnostics", expanded=False):
