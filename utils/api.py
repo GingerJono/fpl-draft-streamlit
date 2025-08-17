@@ -47,3 +47,7 @@ def get_draft_choices(league_id: int):
 def get_entry_event(entry_id: int, event: int):
     # Current squad (picks) for a given entry + GW
     return _get_json(f"{DRAFT_BASE}/entry/{entry_id}/event/{event}", default={})
+
+@st.cache_data(ttl=300)
+def get_event_live(event_id: int):
+    return requests.get(f"{DRAFT_BASE}/event/{event_id}/live").json()
