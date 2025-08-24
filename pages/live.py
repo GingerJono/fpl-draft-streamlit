@@ -1,5 +1,6 @@
 # pages/live.py
 import streamlit as st
+from utils.helpers import highlight_teams, TEAM_COLOURS
 from datetime import datetime, timezone
 try:
     from zoneinfo import ZoneInfo
@@ -216,10 +217,13 @@ else:
             html = ['<table class="fixture-table">']
             html.append("<thead><tr><th>Player [Team]</th><th>Owned by</th><th>Minutes</th><th>Points</th><th>Contrib</th></tr></thead><tbody>")
             for r in rows:
+                owner = r['Owned by']
+                colour = TEAM_COLOURS.get(owner, "")
+                style = f" style='background-color:{colour};'" if colour else ""
                 html.append(
                     f"<tr>"
                     f"<td class='player-team'>{r['Player [Team]']}</td>"
-                    f"<td>{r['Owned by']}</td>"
+                    f"<td{style}>{owner}</td>"
                     f"<td>{r['Minutes']}</td>"
                     f"<td>{r['Points']}</td>"
                     f"<td class='contrib'>{r['Contrib']}</td>"

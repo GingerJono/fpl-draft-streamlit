@@ -1,5 +1,7 @@
 import streamlit as st
 from utils.api import get_game_status, get_league_details
+from utils.helpers import highlight_teams
+import pandas as pd
 
 LEAGUE_ID = 12260   # hardcoded for now
 
@@ -34,15 +36,26 @@ table = [
     for s in league["standings"]
     if s["league_entry"] in entry_map
 ]
-st.dataframe(table, use_container_width=True)
 
-# --- Current Matches ---
+df_table = pd.DataFrame(table)
+st.dataframe(highlight_teams(df_table), use_container_width=True)
+
+# --- Current Matches as Table ---
 st.subheader("Current Gameweek Matches")
 gw = status["current_event"]
 matches = [m for m in league["matches"] if m["event"] == gw]
 
+match_table = []
 for m in matches:
     home = entry_map.get(m["league_entry_1"], {}).get("entry_name", "TBD")
     away = entry_map.get(m["league_entry_2"], {}).get("entry_name", "TBD")
-    score = f"{m['league_entry_1_points']} - {m['league_entry_2_points']}"
-    st.write(f"**{home} vs {away}** → {score}")
+    match_table.append({
+        "Home": home,
+        "Score A": m["league_entry_1_points"],
+        "Score B": m["league_entry_2_points"],
+        "Away": away
+    })
+
+df_match = pd.DataFrame(match_table)
+st.dataframe(highlight_teams(df_match), use_container_width=True)
+
