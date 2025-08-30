@@ -2,6 +2,7 @@
 import streamlit as st
 import pandas as pd
 from datetime import datetime, timezone
+from utils.helpers import compute_score, TEAM_COLOURS
 try:
     from zoneinfo import ZoneInfo
 except Exception:
@@ -23,16 +24,6 @@ LOCAL_TZ = ZoneInfo("Europe/London") if ZoneInfo else timezone.utc
 def now_str():
     return datetime.now(LOCAL_TZ).strftime("%a %d %b %Y, %H:%M:%S %Z")
 
-TEAM_COLOURS = {
-    "Ekitikekitike": "#ffadad",
-    "ØdegaardiansOfTheGal": "#ffd6a5",
-    "Ranger Things": "#fdffb6",
-    "Potter&The½FitWilson": "#caffbf",
-    "Bowen Arrow": "#9bf6ff",
-    "DioufFeelLuckyPunk?": "#a0c4ff",
-    "No Juan Eyed Bernabe": "#bdb2ff",
-}
-
 def style_owner(df, col="Owner"):
     if col not in df.columns:
         return df
@@ -41,77 +32,8 @@ def style_owner(df, col="Owner"):
         return f"background-color: {c}" if c else ""
     return df.style.applymap(_cell, subset=[col])
 
-# --- scoring rules
-SCORING = {
-    'long_play_limit': 60, 'short_play': 1, 'long_play': 2,
-    'concede_limit': 2,
-    'goals_conceded_GKP': -1, 'goals_conceded_DEF': -1, 'goals_conceded_MID': 0, 'goals_conceded_FWD': 0,
-    'saves_limit': 3, 'saves': 1,
-    'goals_scored_GKP': 10, 'goals_scored_DEF': 6, 'goals_scored_MID': 5, 'goals_scored_FWD': 4,
-    'assists': 3,
-    'clean_sheets_GKP': 4, 'clean_sheets_DEF': 4, 'clean_sheets_MID': 1, 'clean_sheets_FWD': 0,
-    'defensive_contribution_limit_GKP': 0, 'defensive_contribution_limit_DEF': 10,
-    'defensive_contribution_limit_MID': 12, 'defensive_contribution_limit_FWD': 12,
-    'defensive_contribution_GKP': 0, 'defensive_contribution_DEF': 2,
-    'defensive_contribution_MID': 2, 'defensive_contribution_FWD': 2,
-    'penalties_saved': 5, 'penalties_missed': -2,
-    'yellow_cards': -1, 'red_cards': -3, 'own_goals': -2,
-    'bonus': 1,
-}
-
-def compute_score(stats: dict, pos: str) -> int:
-    pts = 0
-    minutes = stats.get("minutes", 0)
-
-    # minutes
-    if minutes >= SCORING['long_play_limit']:
-        pts += SCORING['long_play']
-    elif minutes > 0:
-        pts += SCORING['short_play']
-
-    # goals scored
-    if stats.get("goals_scored"):
-        pts += stats["goals_scored"] * SCORING[f"goals_scored_{pos}"]
-
-    # assists
-    pts += stats.get("assists", 0) * SCORING['assists']
-
-    # clean sheet
-    if minutes >= SCORING['long_play_limit'] and stats.get("clean_sheets"):
-        pts += SCORING[f"clean_sheets_{pos}"]
-
-    # goals conceded (only GKP/DEF penalised, after concede_limit)
-    if pos in ("GKP","DEF"):
-        conceded = stats.get("goals_conceded", 0)
-        if conceded >= SCORING['concede_limit']:
-            pts += (conceded // SCORING['concede_limit']) * SCORING[f"goals_conceded_{pos}"]
-
-    # saves (for GKP)
-    if pos == "GKP":
-        saves = stats.get("saves", 0)
-        pts += (saves // SCORING['saves_limit']) * SCORING['saves']
-
-    # defensive contribution
-    dc = stats.get("defensive_contribution", 0)
-    limit = SCORING[f"defensive_contribution_limit_{pos}"]
-    if limit and dc:
-        pts += (dc // limit) * SCORING[f"defensive_contribution_{pos}"]
-
-    # pens
-    pts += stats.get("penalties_saved", 0) * SCORING['penalties_saved']
-    pts += stats.get("penalties_missed", 0) * SCORING['penalties_missed']
-
-    # cards
-    pts += stats.get("yellow_cards", 0) * SCORING['yellow_cards']
-    pts += stats.get("red_cards", 0) * SCORING['red_cards']
-
-    # own goals
-    pts += stats.get("own_goals", 0) * SCORING['own_goals']
-
-    # bonus
-    pts += stats.get("bonus", 0) * SCORING['bonus']
-
-    return pts
+# pages/players.py  (continuing from your current version)
+from utils.api import get_fixtures
 
 # ---- Data
 status = get_game_status() or {}
@@ -122,16 +44,37 @@ players_by_id = {int(p["id"]): p for p in (bootstrap.get("elements") or [])}
 teams = {t["id"]: t["short_name"] for t in (bootstrap.get("teams") or [])}
 pos_map = {et["id"]: et["singular_name_short"] for et in (bootstrap.get("element_types") or [])}
 
+fixtures = get_fixtures(gw) or []
+# Map team_id -> fixture info
+fixture_map = {}
+for f in fixtures:
+    for side in ("team_h", "team_a"):
+        tid = f.get(side)
+        if tid:
+            fixture_map[tid] = f
+
+# inside players.py (after you’ve built fixture_map from get_fixtures)
+
+def get_fixture_label(team_id: int) -> str:
+    f = fixture_map.get(team_id)
+    if not f:
+        return "—"
+    # if this team is home, opponent is away; else vice versa
+    if f.get("team_h") == team_id:
+        opp_id = f.get("team_a")
+    else:
+        opp_id = f.get("team_h")
+    return f"vs. {teams.get(opp_id, '—')}"
+
 live = get_event_live(gw) or {}
 live_elements = live.get("elements", {})
 
+# Normalise live stats
 live_stats = {}
 if isinstance(live_elements, dict):
     for k, v in live_elements.items():
-        try:
-            pid = int(k)
-        except Exception:
-            continue
+        try: pid = int(k)
+        except: continue
         live_stats[pid] = v.get("stats", {}) or {}
 elif isinstance(live_elements, list):
     for v in live_elements:
@@ -142,6 +85,25 @@ elif isinstance(live_elements, list):
 ownership_ids = build_current_ownership_ids(LEAGUE_ID, gw, starters_only=False)
 entries_map = league_entries_map(LEAGUE_ID)
 
+def fixture_status(team_id: int) -> str:
+    f = fixture_map.get(team_id)
+    if not f:
+        return "—"
+    if f.get("finished"):
+        return "Finished"
+    kickoff = f.get("kickoff_time")
+    if kickoff:
+        try:
+            dt = datetime.fromisoformat(kickoff.replace("Z", "+00:00"))
+            now = datetime.now(timezone.utc)
+            if now < dt:
+                return "Not started"
+            else:
+                return "In play"
+        except Exception:
+            pass
+    return "—"
+
 # ---- Build dataframe
 rows = []
 for pid, pl in players_by_id.items():
@@ -149,12 +111,16 @@ for pid, pl in players_by_id.items():
     eid = ownership_ids.get(pid)
     owner = entries_map.get(eid, {}).get("entry_name", "—")
     pos = pos_map.get(pl.get("element_type"), "")
+    team_id = pl.get("team")
+    status_str = fixture_status(team_id)
 
     row = {
         "Player": pl.get("web_name", f"#{pid}"),
         "Pos": pos,
-        "Club": teams.get(pl.get("team"), ""),
+        "Club": teams.get(team_id, ""),
         "Owner": owner,
+        "Fixture": get_fixture_label(team_id),
+        "Fixture Status": status_str,
         "Min": stats.get("minutes", 0),
         "G": stats.get("goals_scored", 0),
         "A": stats.get("assists", 0),
@@ -170,7 +136,7 @@ for pid, pl in players_by_id.items():
         "BPS": stats.get("bps", 0),
         "DC": stats.get("defensive_contribution", 0),
         "API": stats.get("total_points", 0),
-        "Comp": compute_score(stats, pos),
+        "Comp": compute_score(stats, pos),  # eventually pass bonus_override here
     }
     rows.append(row)
 
@@ -191,6 +157,7 @@ else:
         style_owner(df, col="Owner"),
         use_container_width=True,
         column_config={
+            "Fixture Status": st.column_config.TextColumn("Status", help="Fixture status (Not started / In play / Finished)"),
             "Min": st.column_config.NumberColumn("Min", help="Minutes played"),
             "G": st.column_config.NumberColumn("G", help="Goals scored"),
             "A": st.column_config.NumberColumn("A", help="Assists"),
