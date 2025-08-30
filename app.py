@@ -59,3 +59,6 @@ for m in matches:
 df_match = pd.DataFrame(match_table)
 st.dataframe(highlight_teams(df_match), use_container_width=True)
 
+# Dev diagnostics (optional)
+with st.expander("Dev: diagnostics", expanded=False):
+    st.write(f"status: {status})")

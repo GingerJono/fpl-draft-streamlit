@@ -2,13 +2,12 @@
 import streamlit as st
 from utils.helpers import highlight_teams, TEAM_COLOURS
 from datetime import datetime, timezone
+import pandas as pd
+
 try:
     from zoneinfo import ZoneInfo
 except Exception:
     ZoneInfo = None
-
-# Build CURRENT ownership (element_id -> owner team name) from each entry's GW picks
-from utils.api import build_current_ownership
 
 # Optional autorefresh (pip install streamlit-autorefresh)
 try:
@@ -23,7 +22,6 @@ from utils.api import (
 
 st.set_page_config(layout="wide")
 
-LEAGUE_ID = 12260
 LOCAL_TZ = ZoneInfo("Europe/London") if ZoneInfo else timezone.utc
 
 def now_str():
@@ -33,14 +31,6 @@ def fixture_label(f):
     home = _team_abbr(f.get("team_h"))
     away = _team_abbr(f.get("team_a"))
     # compact date/time (local tz, no year)
-    dt_str = ""
-    if f.get("kickoff_time"):
-        try:
-            dt = datetime.fromisoformat(f["kickoff_time"].replace("Z", "+00:00"))
-            dt_local = dt.astimezone(LOCAL_TZ)
-            dt_str = dt_local.strftime("%a%H%M")  # e.g. Sat1500
-        except Exception:
-            pass
     return f"{home}-{away}"
 
 
@@ -54,19 +44,27 @@ def format_kickoff(iso_utc: str) -> str:
         return iso_utc
 
 # ---- Load core data
+LEAGUE_ID = 12260
 status    = get_game_status() or {}
 gw        = status.get("current_event", 1)
 bootstrap = get_bootstrap() or {}
 fixtures  = sorted(get_fixtures(gw) or [], key=lambda x: x.get("kickoff_time") or "")
 league    = get_league_details(LEAGUE_ID) or {}
 live      = get_event_live(gw) or {}
+# Build CURRENT ownership (element_id -> owner team name) from each entry's GW picks
+# Build ownership (element -> entry_id) and entry_id -> name map
+from utils.api import build_current_ownership_ids, league_entries_map
+
+ownership_ids = build_current_ownership_ids(LEAGUE_ID, gw, starters_only=False)
+entries_map = league_entries_map(LEAGUE_ID)                                # entry_id -> entry obj
 
 # Team + player lookups
 teams = {
     t["id"]: {"name": t["name"], "abbr": t["short_name"]}
     for t in (bootstrap.get("teams") or [])
 }
-players_by_id = {p["id"]: p for p in (bootstrap.get("elements") or [])}
+
+players_by_id = {int(p["id"]): p for p in (bootstrap.get("elements") or [])}
 
 def _team_name(team_id: int) -> str:
     t = teams.get(team_id, {})
@@ -79,8 +77,9 @@ def _team_abbr(team_id: int) -> str:
 LEAGUE_ID = 12260
 gw = status.get("current_event", 1)
 
-# starters_only=True -> only XI (multiplier > 0); False -> XI + bench
-ownership = build_current_ownership(LEAGUE_ID, gw, starters_only=False)
+# element -> entry_name
+ownership = {pid: entries_map.get(eid, {}).get("entry_name", "—")
+             for pid, eid in ownership_ids.items()}
 
 # ---- Live stats map from /event/{gw}/live
 # Endpoint shape can be dict { "82": {...} } or list [{id, stats, ...}]
@@ -184,9 +183,10 @@ else:
                 pid = int(p["id"])
                 name = p.get("web_name", f"Player {pid}")
                 team_abbr = teams.get(p["team"], {}).get("abbr", "")
-                owner = ownership.get(pid, "—")
+                owner_eid = ownership_ids.get(pid)
+                owner = entries_map.get(owner_eid, {}).get("entry_name", "—")
 
-                stats = live_stats_map.get(pid, {})
+                stats   = live_stats_map.get(pid, {})
                 minutes = stats.get("minutes", 0)
                 points  = stats.get("total_points", 0)
 
@@ -203,14 +203,12 @@ else:
                 if "bps" in stats: contribs.append(f"bps+{stats['bps']}")
                 if "defensive_contribution" in stats: contribs.append(f"def+{stats['defensive_contribution']}")
 
-                contrib_str = " ".join(contribs) if contribs else "—"
-
                 rows.append({
                     "Player [Team]": f"{name} [{team_abbr}]",
                     "Owned by": owner,
                     "Minutes": minutes,
                     "Points": points,
-                    "Contrib": contrib_str,
+                    "Contrib": " ".join(contribs) if contribs else "—",
                 })
 
             # Render table
@@ -234,7 +232,42 @@ else:
 
 # Dev diagnostics (optional)
 with st.expander("Dev: diagnostics", expanded=False):
-    st.write(f"entries: {len(league.get('league_entries') or [])} | "
-             f"ownership: {len(ownership)} | fixtures: {len(fixtures)} | live players: {len(live_stats_map)}")
-    if st.checkbox("Show raw ownership map"):
-        st.json(ownership)
+    st.write(f"{len(bootstrap)}")
+    st.write(
+        f"entries: {len(league.get('league_entries') or [])} | "
+        f"ownership_ids: {len(ownership_ids)} | fixtures: {len(fixtures)} | "
+        f"live players: {len(live_stats_map)}"
+    )
+
+    pid_probe = st.text_input("Probe element_id (e.g. 661)", value="")
+    if pid_probe.strip().isdigit():
+        from utils.api import who_owns_element
+        eid, name = who_owns_element(LEAGUE_ID, gw, int(pid_probe))
+        st.write("Actual GW owner →", {"entry_id": eid, "entry_name": name})
+
+    # --- show fixtures for this gameweek
+    if fixtures:
+        st.subheader(f"Fixtures GW{gw}")
+        fix_table = []
+        for f in fixtures:
+            home_id = f.get("team_h")
+            away_id = f.get("team_a")
+            home = teams.get(home_id, {}).get("name", home_id)
+            away = teams.get(away_id, {}).get("name", away_id)
+            ko   = format_kickoff(f.get("kickoff_time"))
+            fix_table.append({
+                "HomeID": home_id, "Home": home,
+                "AwayID": away_id, "Away": away,
+                "Kickoff": ko,
+                "FixtureLabel": fixture_label(f),
+            })
+        st.dataframe(pd.DataFrame(fix_table))
+    else:
+        st.info("No fixtures returned for this GW")
+
+    # --- show teams mapping (bootstrap)
+    if teams:
+        st.subheader("Teams (bootstrap)")
+        team_table = [{"ID": tid, "Name": t["name"], "Abbr": t["abbr"]}
+                      for tid, t in teams.items()]
+        st.dataframe(pd.DataFrame(team_table).sort_values("ID"))
